@@ -108,36 +108,85 @@ def normalize_pickle_data(data) -> List[Dict]:
     raise ValueError(f"Unknown pickle format. Type={type(data)}, Keys={list(data.keys())[:5] if isinstance(data, dict) else 'N/A'}")
 
 
-def extract_sentence_eeg(sentence_obj: Dict, normalize: bool = True) -> Optional[np.ndarray]:
+def extract_sentence_eeg(sentence_obj: Dict, normalize: bool = True, max_time_samples: int = 500) -> Optional[np.ndarray]:
     """
     Extract sentence-level EEG features.
     
+    Handles two formats:
+    1. Spectro format: sentence_level_EEG = {'rawData': ndarray(105, T)}
+    2. Regular format: sentence_level_EEG = {'mean_t1': array(105), 'mean_t2': array(105), ...}
+    
+    Args:
+        sentence_obj: Sentence dictionary
+        normalize: Whether to normalize EEG
+        max_time_samples: Max time samples for spectro format (pad/crop)
+    
     Returns:
-        EEG array of shape (105, 8) or None if invalid
+        For regular format: EEG array of shape (105, 8) - channels x bands
+        For spectro format: EEG array of shape (105, max_time_samples) - channels x time
+        None if invalid
     """
     try:
-        features = []
-        for band in FREQUENCY_BANDS:
-            key = 'mean' + band
-            data = sentence_obj['sentence_level_EEG'][key]
-            if len(data) != NUM_CHANNELS:
-                return None
-            features.append(data)
+        eeg_data = sentence_obj.get('sentence_level_EEG', {})
         
-        # Stack: (num_bands, num_channels) -> transpose to (num_channels, num_bands)
-        eeg = np.stack(features, axis=0).T  # Shape: (105, 8)
-        
-        if normalize:
-            # Per-channel normalization
-            mean = eeg.mean(axis=1, keepdims=True)
-            std = eeg.std(axis=1, keepdims=True) + 1e-8
-            eeg = (eeg - mean) / std
-        
-        # Check for NaN/Inf
-        if np.isnan(eeg).any() or np.isinf(eeg).any():
-            return None
+        # Check for spectro format (rawData)
+        if 'rawData' in eeg_data:
+            raw = np.array(eeg_data['rawData'])  # (105, T)
             
-        return eeg.astype(np.float32)
+            if raw.shape[0] != NUM_CHANNELS:
+                return None
+            
+            # Pad or crop to fixed time length
+            T = raw.shape[1]
+            if T < max_time_samples:
+                # Pad with zeros
+                padded = np.zeros((NUM_CHANNELS, max_time_samples), dtype=np.float32)
+                padded[:, :T] = raw
+                eeg = padded
+            else:
+                # Crop
+                eeg = raw[:, :max_time_samples]
+            
+            if normalize:
+                # Per-channel normalization
+                mean = eeg.mean(axis=1, keepdims=True)
+                std = eeg.std(axis=1, keepdims=True) + 1e-8
+                eeg = (eeg - mean) / std
+            
+            # Check for NaN/Inf
+            if np.isnan(eeg).any() or np.isinf(eeg).any():
+                return None
+            
+            return eeg.astype(np.float32)
+        
+        # Check for regular format (mean_* frequency bands)
+        elif 'mean_t1' in eeg_data:
+            features = []
+            for band in FREQUENCY_BANDS:
+                key = 'mean' + band
+                data = eeg_data.get(key)
+                if data is None or len(data) != NUM_CHANNELS:
+                    return None
+                features.append(data)
+            
+            # Stack: (num_bands, num_channels) -> transpose to (num_channels, num_bands)
+            eeg = np.stack(features, axis=0).T  # Shape: (105, 8)
+            
+            if normalize:
+                # Per-channel normalization
+                mean = eeg.mean(axis=1, keepdims=True)
+                std = eeg.std(axis=1, keepdims=True) + 1e-8
+                eeg = (eeg - mean) / std
+            
+            # Check for NaN/Inf
+            if np.isnan(eeg).any() or np.isinf(eeg).any():
+                return None
+            
+            return eeg.astype(np.float32)
+        
+        else:
+            # Unknown format
+            return None
         
     except Exception as e:
         return None

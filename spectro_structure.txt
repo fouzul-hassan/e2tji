@@ -1,0 +1,13 @@
+Type: <class 'dict'>
+Keys: ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
+
+Subject: ZAB
+Subject data type: <class 'list'>
+Number of sentences: 400
+
+First sentence type: <class 'dict'>
+First sentence keys: ['content', 'sentence_level_EEG']
+
+sentence_level_EEG type: <class 'dict'>
+sentence_level_EEG keys: ['rawData']
+  rawData: type=ndarray, shape/len=(105, 3341)
