@@ -24,7 +24,7 @@ Convert your EEG2TEXT pickle files to PyTorch format:
 
 ```bash
 python scripts/prepare_pytorch_data.py \
-    --input_dir "C:/MSc Files/MSc Project/E2T-w-VJEPA/e2t-w-jepa-pretraining/dataset/ZuCo" \
+    --pickle_files "path/to/task1-SR-dataset.pickle" "path/to/task2-NR-dataset.pickle" \
     --output_dir "./data/processed"
 ```
 
@@ -37,23 +37,36 @@ data/processed/
 └── metadata.pt     # Configuration
 ```
 
-### 3. Train Model
+### 3. Train Model (Step by Step)
 
-**Run all stages:**
+**Stage 1: Self-supervised pretraining (masked reconstruction)**
 ```bash
-python scripts/train.py --stage all --device cuda
+python scripts/train_stage1.py \
+    --data_dir ./data/processed \
+    --epochs 100 \
+    --device cuda
 ```
 
-**Run individual stages:**
+**Stage 2: EEG-Text alignment (VL-JEPA)**
 ```bash
-# Stage 1: Self-supervised pretraining
-python scripts/train.py --stage 1 --epochs_stage1 100
+python scripts/train_stage2.py \
+    --data_dir ./data/processed \
+    --epochs 50 \
+    --device cuda
+```
 
-# Stage 2: EEG-Text alignment
-python scripts/train.py --stage 2 --epochs_stage2 50
+**Stage 3: Text decoder fine-tuning (BART)**
+```bash
+python scripts/train_stage3.py \
+    --data_dir ./data/processed \
+    --epochs 20 \
+    --device cuda
+```
 
-# Stage 3: Decoder fine-tuning
-python scripts/train.py --stage 3 --epochs_stage3 20
+### Alternative: Run All Stages at Once
+
+```bash
+python scripts/train.py --stage all --device cuda
 ```
 
 ## Architecture
