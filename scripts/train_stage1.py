@@ -23,12 +23,19 @@ def main():
     # Data
     parser.add_argument('--data_dir', type=str, default='./data/processed',
                         help='Directory with processed .pt files')
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=8,
+                        help='Batch size (reduce for spectro data to avoid OOM)')
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--grad_accum_steps', type=int, default=4,
+                        help='Gradient accumulation steps (effective batch = batch_size * grad_accum_steps)')
+    parser.add_argument('--fp16', action='store_true',
+                        help='Use mixed precision training')
     
     # Model
-    parser.add_argument('--embed_dim', type=int, default=256)
-    parser.add_argument('--num_transformer_layers', type=int, default=4)
+    parser.add_argument('--embed_dim', type=int, default=128,
+                        help='Embedding dimension (128 for memory efficiency)')
+    parser.add_argument('--num_transformer_layers', type=int, default=2,
+                        help='Number of transformer layers')
     parser.add_argument('--mask_ratio', type=float, default=0.15)
     
     # Training
@@ -91,7 +98,9 @@ def main():
         epochs=args.epochs,
         lr=args.lr,
         device=args.device,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        grad_accum_steps=args.grad_accum_steps,
+        use_fp16=args.fp16
     )
     
     # Final test evaluation

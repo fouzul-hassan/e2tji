@@ -90,7 +90,9 @@ def train_stage1(
     lr: float = 1e-4,
     device: str = 'cuda',
     save_dir: str = './checkpoints',
-    log_interval: int = 10
+    log_interval: int = 10,
+    grad_accum_steps: int = 1,
+    use_fp16: bool = False
 ) -> PretrainingModel:
     """
     Train Stage 1 pretraining model.
@@ -104,6 +106,8 @@ def train_stage1(
         device: Device to train on
         save_dir: Directory to save checkpoints
         log_interval: Log every N batches
+        grad_accum_steps: Gradient accumulation steps
+        use_fp16: Use mixed precision training
         
     Returns:
         Trained model
@@ -115,8 +119,13 @@ def train_stage1(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
     
+    # Mixed precision scaler
+    scaler = torch.cuda.amp.GradScaler() if use_fp16 and device == 'cuda' else None
+    
     best_val_mse = float('inf')
     history = {'train_loss': [], 'val_mse': [], 'val_corr': [], 'val_snr': []}
+    
+    effective_batch = train_loader.batch_size * grad_accum_steps
     
     print(f"\n{'='*60}")
     print("Stage 1: Self-Supervised Pretraining")
@@ -124,6 +133,10 @@ def train_stage1(
     print(f"Device: {device}")
     print(f"Epochs: {epochs}")
     print(f"Learning rate: {lr}")
+    print(f"Batch size: {train_loader.batch_size}")
+    print(f"Gradient accumulation: {grad_accum_steps}")
+    print(f"Effective batch size: {effective_batch}")
+    print(f"Mixed precision: {use_fp16}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"{'='*60}\n")
@@ -132,23 +145,52 @@ def train_stage1(
         # Training
         model.train()
         train_loss = 0
+        optimizer.zero_grad()
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, batch in enumerate(pbar):
             eeg = batch['eeg'].to(device)
             
-            optimizer.zero_grad()
-            reconstructed, loss, mask = model(eeg)
-            loss.backward()
-            optimizer.step()
+            # Forward pass with optional mixed precision
+            if use_fp16 and scaler is not None:
+                with torch.cuda.amp.autocast():
+                    reconstructed, loss, mask = model(eeg)
+                    loss = loss / grad_accum_steps
+                scaler.scale(loss).backward()
+            else:
+                reconstructed, loss, mask = model(eeg)
+                loss = loss / grad_accum_steps
+                loss.backward()
             
-            train_loss += loss.item()
+            train_loss += loss.item() * grad_accum_steps
+            
+            # Gradient accumulation step
+            if (batch_idx + 1) % grad_accum_steps == 0:
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
             
             if batch_idx % log_interval == 0:
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                pbar.set_postfix({'loss': f'{loss.item() * grad_accum_steps:.4f}'})
+        
+        # Handle remaining gradients
+        if (batch_idx + 1) % grad_accum_steps != 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
         
         train_loss /= len(train_loader)
         history['train_loss'].append(train_loss)
+        
+        # Clear cache before validation
+        if device == 'cuda':
+            torch.cuda.empty_cache()
         
         # Validation
         val_metrics = evaluate_pretraining(model, val_loader, device)
