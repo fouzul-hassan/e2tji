@@ -2,7 +2,12 @@
 Convert EEG2TEXT pickle files to PyTorch-ready format.
 Creates train/val/test splits based on subjects.
 
-Usage:
+Usage (Option 1 - specify pickle files directly):
+    python scripts/prepare_pytorch_data.py \
+        --pickle_files "path/to/task1-SR-dataset.pickle" "path/to/task2-NR-dataset.pickle" \
+        --output_dir "./data/processed"
+
+Usage (Option 2 - specify input directory):
     python scripts/prepare_pytorch_data.py \
         --input_dir "C:/MSc Files/MSc Project/E2T-w-VJEPA/e2t-w-jepa-pretraining/dataset/ZuCo" \
         --output_dir "./data/processed"
@@ -91,12 +96,15 @@ def extract_sentence_eeg(sentence_obj: Dict, normalize: bool = True) -> Optional
 
 
 def process_pickle_files(
-    input_dir: Path,
+    pickle_paths: List[Path],
     output_dir: Path,
-    tasks: List[str] = ['task1-SR', 'task2-NR', 'task3-TSR']
 ):
     """
-    Process all pickle files and save as PyTorch tensors.
+    Process pickle files and save as PyTorch tensors.
+    
+    Args:
+        pickle_paths: List of paths to pickle files
+        output_dir: Output directory for processed data
     
     Output files:
         output_dir/
@@ -124,24 +132,21 @@ def process_pickle_files(
         subject_to_split[s] = 'test'
     
     # Track statistics
-    stats = {'total': 0, 'skipped': 0, 'by_task': {}}
+    stats = {'total': 0, 'skipped': 0, 'by_file': {}}
     
-    # Process each task
-    for task in tasks:
-        pickle_path = input_dir / task / f"{task}-dataset.pickle"
-        
-        # Try alternative naming
-        if not pickle_path.exists():
-            pickle_path = input_dir / task / f"{task}-dataset_spectro.pickle"
+    # Process each pickle file
+    for pickle_path in pickle_paths:
+        pickle_path = Path(pickle_path)
         
         if not pickle_path.exists():
             print(f"⚠ Warning: {pickle_path} not found, skipping...")
             continue
         
         data = load_pickle(str(pickle_path))
-        task_count = 0
+        file_count = 0
+        file_name = pickle_path.name
         
-        for subject_data in tqdm(data, desc=f"Processing {task}"):
+        for subject_data in tqdm(data, desc=f"Processing {file_name}"):
             subject_id = subject_data['subject']
             
             # Determine split
@@ -168,9 +173,9 @@ def process_pickle_files(
                 splits[split]['subjects'].append(subject_id)
                 
                 stats['total'] += 1
-                task_count += 1
+                file_count += 1
         
-        stats['by_task'][task] = task_count
+        stats['by_file'][file_name] = file_count
     
     # Save each split
     print("\n" + "="*60)
@@ -211,28 +216,66 @@ def process_pickle_files(
     print(f"\nStatistics:")
     print(f"  Total samples: {stats['total']}")
     print(f"  Skipped: {stats['skipped']}")
-    print(f"  By task: {stats['by_task']}")
+    print(f"  By file: {stats['by_file']}")
+
+
+def get_pickle_paths_from_dir(input_dir: Path, tasks: List[str]) -> List[Path]:
+    """Get pickle file paths from input directory."""
+    pickle_paths = []
+    for task in tasks:
+        pickle_path = input_dir / task / f"{task}-dataset.pickle"
+        if not pickle_path.exists():
+            pickle_path = input_dir / task / f"{task}-dataset_spectro.pickle"
+        if pickle_path.exists():
+            pickle_paths.append(pickle_path)
+    return pickle_paths
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert ZuCo pickle files to PyTorch format')
-    parser.add_argument('--input_dir', type=str, required=True,
-                        help='Directory containing ZuCo pickle files')
+    parser = argparse.ArgumentParser(
+        description='Convert ZuCo pickle files to PyTorch format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Option 1: Specify pickle files directly
+  python scripts/prepare_pytorch_data.py --pickle_files task1.pickle task2.pickle
+  
+  # Option 2: Specify input directory (auto-discovers pickle files)
+  python scripts/prepare_pytorch_data.py --input_dir ./dataset/ZuCo
+        """
+    )
+    parser.add_argument('--pickle_files', type=str, nargs='+',
+                        help='Paths to pickle files (can specify multiple)')
+    parser.add_argument('--input_dir', type=str,
+                        help='Directory containing ZuCo pickle files (alternative to --pickle_files)')
     parser.add_argument('--output_dir', type=str, default='./data/processed',
                         help='Output directory for PyTorch files')
     parser.add_argument('--tasks', type=str, nargs='+', 
                         default=['task1-SR', 'task2-NR', 'task3-TSR'],
-                        help='Tasks to process')
+                        help='Tasks to process (used with --input_dir)')
     args = parser.parse_args()
     
-    process_pickle_files(
-        Path(args.input_dir), 
-        Path(args.output_dir),
-        args.tasks
-    )
+    # Get pickle paths
+    pickle_paths = []
+    
+    if args.pickle_files:
+        pickle_paths.extend([Path(p) for p in args.pickle_files])
+    
+    if args.input_dir:
+        pickle_paths.extend(get_pickle_paths_from_dir(Path(args.input_dir), args.tasks))
+    
+    if not pickle_paths:
+        parser.error("Must specify either --pickle_files or --input_dir")
+    
+    print(f"Processing {len(pickle_paths)} pickle file(s):")
+    for p in pickle_paths:
+        print(f"  - {p}")
+    
+    process_pickle_files(pickle_paths, Path(args.output_dir))
     
     print("\n✓ Data preparation complete!")
 
 
 if __name__ == '__main__':
     main()
+
