@@ -29,13 +29,14 @@ BRAIN_REGIONS = {
 }
 
 # Subject splits for ZuCo v1.0 (12 subjects)
+# Actual subjects: ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
 ZUCO_V1_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 
-                     'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH', 'ZRP']
+                     'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
 
 # Default subject-based splits (8 train / 2 val / 2 test)
-DEFAULT_TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZKB', 'ZKH']
-DEFAULT_VAL_SUBJECTS = ['ZKW', 'ZMG']
-DEFAULT_TEST_SUBJECTS = ['ZPH', 'ZRP']
+DEFAULT_TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB']
+DEFAULT_VAL_SUBJECTS = ['ZKH', 'ZKW']
+DEFAULT_TEST_SUBJECTS = ['ZMG', 'ZPH']
 
 
 def get_region_channels(region_name: str) -> list:

@@ -30,9 +30,10 @@ NUM_CHANNELS = 105
 NUM_BANDS = 8
 
 # Subject splits for ZuCo v1.0 (12 subjects)
-TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZKB', 'ZKH']
-VAL_SUBJECTS = ['ZKW', 'ZMG']
-TEST_SUBJECTS = ['ZPH', 'ZRP']
+# Actual subjects: ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
+TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB']  # 8 subjects
+VAL_SUBJECTS = ['ZKH', 'ZKW']    # 2 subjects
+TEST_SUBJECTS = ['ZMG', 'ZPH']   # 2 subjects
 
 # Brain region channel mapping
 BRAIN_REGIONS = {
@@ -53,11 +54,58 @@ BRAIN_REGIONS = {
 # Processing Functions
 # ============================================================================
 
-def load_pickle(path: str) -> List[Dict]:
+def load_pickle(path: str):
     """Load EEG2TEXT pickle file."""
     print(f"Loading {path}...")
     with open(path, 'rb') as f:
-        return pickle.load(f)
+        data = pickle.load(f)
+    
+    # Debug: show structure
+    print(f"  Data type: {type(data)}")
+    if isinstance(data, dict):
+        print(f"  Keys: {list(data.keys())[:5]}...")
+    elif isinstance(data, list):
+        print(f"  Length: {len(data)}")
+        if len(data) > 0:
+            print(f"  First item type: {type(data[0])}")
+            if isinstance(data[0], dict):
+                print(f"  First item keys: {list(data[0].keys())}")
+    
+    return data
+
+
+def normalize_pickle_data(data) -> List[Dict]:
+    """
+    Normalize pickle data to standard format: List of {'subject': str, 'sentence': List[Dict]}
+    
+    Handles ZuCo format:
+        {
+            'ZAB': [sentence_dict, sentence_dict, ...],  # Subject ID -> list of sentences
+            'ZDM': [...],
+            ...
+        }
+    """
+    # Format: Dict with subject IDs as keys
+    if isinstance(data, dict):
+        first_key = list(data.keys())[0]
+        first_val = data[first_key]
+        
+        # Check if values are lists of sentence dicts
+        if isinstance(first_val, list):
+            normalized = []
+            for subject_id, sentences in data.items():
+                normalized.append({
+                    'subject': subject_id,
+                    'sentence': sentences  # List of sentence dicts
+                })
+            return normalized
+    
+    # Format: Already in standard format (list of subject dicts)
+    if isinstance(data, list):
+        if len(data) > 0 and isinstance(data[0], dict) and 'subject' in data[0]:
+            return data
+    
+    raise ValueError(f"Unknown pickle format. Type={type(data)}, Keys={list(data.keys())[:5] if isinstance(data, dict) else 'N/A'}")
 
 
 def extract_sentence_eeg(sentence_obj: Dict, normalize: bool = True) -> Optional[np.ndarray]:
@@ -143,6 +191,11 @@ def process_pickle_files(
             continue
         
         data = load_pickle(str(pickle_path))
+        
+        # Normalize to standard format
+        data = normalize_pickle_data(data)
+        print(f"  Normalized to {len(data)} subjects")
+        
         file_count = 0
         file_name = pickle_path.name
         

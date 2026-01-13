@@ -1,0 +1,23 @@
+Type: <class 'dict'>
+Keys: ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
+
+Subject: ZAB
+Subject data type: <class 'list'>
+Subject data length: 400
+
+First sentence type: <class 'dict'>
+First sentence keys: ['content', 'sentence_level_EEG', 'answer_EEG', 'word', 'word_tokens_has_fixation', 'word_tokens_with_mask', 'word_tokens_all']
+  content: 'Presents a good case while failing to provide a re...'
+  sentence_level_EEG: dict with keys ['mean_t1', 'mean_t2', 'mean_a1', 'mean_a2', 'mean_b1']
+  answer_EEG: dict with keys ['answer_mean_t1', 'answer_mean_t2', 'answer_mean_a1', 'answer_mean_a2', 'answer_mean_b1']
+  word: list of 17 items
+  word_tokens_has_fixation: list of 17 items
+  word_tokens_with_mask: list of 22 items
+  word_tokens_all: list of 22 items
+
+sentence_level_EEG keys: ['mean_t1', 'mean_t2', 'mean_a1', 'mean_a2', 'mean_b1', 'mean_b2', 'mean_g1', 'mean_g2']
+  mean_t1: len=105
+  mean_t2: len=105
+  mean_a1: len=105
+
+Content: Presents a good case while failing to provide a reason for us to care beyond the very basic dictums of human decency.
