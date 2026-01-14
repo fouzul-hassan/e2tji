@@ -115,7 +115,7 @@ def run_stage3(args, train_loader, val_loader, test_loader, jepa_model=None):
             embed_dim=args.embed_dim,
             text_encoder_name=args.text_encoder
         )
-        checkpoint = torch.load(Path(args.save_dir) / 'stage2_best.pt')
+        checkpoint = torch.load(Path(args.save_dir) / 'stage2_best.pt', weights_only=False)
         jepa_model.load_state_dict(checkpoint['model_state_dict'])
         print("Loaded Stage 2 checkpoint")
     

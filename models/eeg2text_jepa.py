@@ -184,7 +184,7 @@ class EEG2TextJEPA(nn.Module):
     def _load_pretrained(self, path: str):
         """Load pretrained Stage 1 encoder weights."""
         print(f"Loading pretrained weights from {path}")
-        state_dict = torch.load(path, map_location='cpu')
+        state_dict = torch.load(path, map_location='cpu', weights_only=False)
         
         # Try to load encoder weights
         encoder_keys = [k for k in state_dict.keys() if 'encoder' in k]

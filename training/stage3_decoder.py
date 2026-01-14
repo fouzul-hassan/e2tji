@@ -255,7 +255,7 @@ def train_stage3(
             print(f"  ✓ Saved best model (BLEU-4: {best_bleu4:.4f})")
     
     # Load best model
-    checkpoint = torch.load(save_dir / 'stage3_best.pt')
+    checkpoint = torch.load(save_dir / 'stage3_best.pt', weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"\n✓ Loaded best model from epoch {checkpoint['epoch']+1}")
     

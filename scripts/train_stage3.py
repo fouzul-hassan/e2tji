@@ -83,7 +83,7 @@ def main():
         text_encoder_name=args.text_encoder
     )
     
-    checkpoint = torch.load(args.stage2_path, map_location='cpu')
+    checkpoint = torch.load(args.stage2_path, map_location='cpu', weights_only=False)
     jepa_model.load_state_dict(checkpoint['model_state_dict'])
     print("✓ Loaded Stage 2 model")
     
