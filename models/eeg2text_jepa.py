@@ -24,38 +24,71 @@ class RegionEncoder(nn.Module):
     """
     Encoder for a single brain region.
     
-    Input: (batch, num_region_channels, num_bands)
-    Output: (batch, embed_dim)
+    Handles both formats:
+    - Regular: (batch, num_region_channels, 8) - frequency bands
+    - Spectro: (batch, num_region_channels, T) - time series
     """
     
     def __init__(self, 
                  num_channels: int, 
-                 num_bands: int = 8, 
+                 num_features: int = 8, 
                  embed_dim: int = 256,
                  dropout: float = 0.1):
         super().__init__()
         
-        input_dim = num_channels * num_bands
+        self.num_channels = num_channels
+        self.num_features = num_features
         
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, embed_dim),
-            nn.LayerNorm(embed_dim)
-        )
+        # For spectro data (large feature dim), use CNN to compress
+        if num_features > 100:
+            # CNN-based encoder for time series
+            self.use_cnn = True
+            self.conv = nn.Sequential(
+                nn.Conv1d(num_channels, 64, kernel_size=15, stride=5, padding=7),
+                nn.BatchNorm1d(64),
+                nn.GELU(),
+                nn.Conv1d(64, 128, kernel_size=7, stride=3, padding=3),
+                nn.BatchNorm1d(128),
+                nn.GELU(),
+                nn.AdaptiveAvgPool1d(8),  # Always output 8 time steps
+            )
+            # Output: (B, 128, 8) -> flatten: 1024
+            self.proj = nn.Sequential(
+                nn.Linear(128 * 8, embed_dim),
+                nn.LayerNorm(embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim, embed_dim),
+                nn.LayerNorm(embed_dim)
+            )
+        else:
+            # Linear encoder for frequency band data
+            self.use_cnn = False
+            input_dim = num_channels * num_features
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, embed_dim),
+                nn.LayerNorm(embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim, embed_dim),
+                nn.LayerNorm(embed_dim)
+            )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Region EEG (B, num_region_channels, num_bands)
+            x: Region EEG (B, num_region_channels, num_features)
         Returns:
             Region features (B, embed_dim)
         """
         B = x.size(0)
-        x = x.reshape(B, -1)  # Flatten
-        return self.net(x)
+        if self.use_cnn:
+            x = self.conv(x)  # (B, 128, 8)
+            x = x.reshape(B, -1)  # (B, 1024)
+            return self.proj(x)
+        else:
+            x = x.reshape(B, -1)  # Flatten
+            return self.net(x)
 
 
 class MultiViewTransformer(nn.Module):
@@ -64,13 +97,13 @@ class MultiViewTransformer(nn.Module):
     
     Each region has its own encoder, then a global transformer fuses all regions.
     
-    Input: (batch, 105, 8) - full EEG
+    Input: (batch, 105, num_features) - full EEG (num_features can be 8 or 500)
     Output: (batch, embed_dim) - fused representation
     """
     
     def __init__(self,
                  brain_regions: Dict[str, List[int]] = None,
-                 num_bands: int = 8,
+                 num_features: int = 8,
                  embed_dim: int = 256,
                  global_transformer_layers: int = 4,
                  num_heads: int = 8,
@@ -79,10 +112,11 @@ class MultiViewTransformer(nn.Module):
         
         self.regions = brain_regions or BRAIN_REGIONS
         self.num_regions = len(self.regions)
+        self.num_features = num_features
         
         # Create one encoder per brain region
         self.region_encoders = nn.ModuleDict({
-            name: RegionEncoder(len(channels), num_bands, embed_dim, dropout)
+            name: RegionEncoder(len(channels), num_features, embed_dim, dropout)
             for name, channels in self.regions.items()
         })
         
@@ -113,7 +147,7 @@ class MultiViewTransformer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Full EEG (B, 105, 8)
+            x: Full EEG (B, 105, num_features)
         Returns:
             Fused features (B, embed_dim)
         """
@@ -122,7 +156,7 @@ class MultiViewTransformer(nn.Module):
         # Process each region
         region_features = []
         for name, channels in self.regions.items():
-            region_x = x[:, channels, :]  # (B, num_region_channels, 8)
+            region_x = x[:, channels, :]  # (B, num_region_channels, num_features)
             feat = self.region_encoders[name](region_x)  # (B, embed_dim)
             region_features.append(feat)
         
@@ -150,13 +184,19 @@ class EEG2TextJEPA(nn.Module):
     
     def __init__(self,
                  embed_dim: int = 256,
+                 num_features: int = 8,
                  text_encoder_name: str = 'sentence-transformers/all-MiniLM-L6-v2',
                  pretrained_path: Optional[str] = None,
                  freeze_text_encoder: bool = True):
         super().__init__()
         
+        self.num_features = num_features
+        
         # Multi-View EEG Encoder
-        self.eeg_encoder = MultiViewTransformer(embed_dim=embed_dim)
+        self.eeg_encoder = MultiViewTransformer(
+            num_features=num_features,
+            embed_dim=embed_dim
+        )
         
         # Load pretrained Stage 1 weights if provided
         if pretrained_path:

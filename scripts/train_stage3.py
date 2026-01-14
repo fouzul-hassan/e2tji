@@ -73,6 +73,13 @@ def main():
         num_workers=args.num_workers
     )
     
+    # Detect EEG shape from first batch
+    sample_batch = next(iter(train_loader))
+    eeg_shape = sample_batch['eeg'].shape
+    num_features = eeg_shape[2]  # (B, 105, num_features)
+    print(f"EEG shape: {eeg_shape}")
+    print(f"Detected num_features: {num_features}")
+    
     # Load Stage 2 model
     print("\n" + "="*60)
     print("STAGE 3: TEXT DECODER FINE-TUNING")
@@ -80,6 +87,7 @@ def main():
     
     jepa_model = EEG2TextJEPA(
         embed_dim=args.embed_dim,
+        num_features=num_features,
         text_encoder_name=args.text_encoder
     )
     
