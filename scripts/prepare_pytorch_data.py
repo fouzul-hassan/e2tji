@@ -29,11 +29,20 @@ FREQUENCY_BANDS = ['_t1', '_t2', '_a1', '_a2', '_b1', '_b2', '_g1', '_g2']
 NUM_CHANNELS = 105
 NUM_BANDS = 8
 
-# Subject splits for ZuCo v1.0 (12 subjects)
-# Actual subjects: ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH']
-TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB']  # 8 subjects
-VAL_SUBJECTS = ['ZKH', 'ZKW']    # 2 subjects
-TEST_SUBJECTS = ['ZMG', 'ZPH']   # 2 subjects
+# Subject splits for ZuCo v1.0 (12 subjects) - prefix Z
+ZUCO1_TRAIN_SUBJECTS = ['ZAB', 'ZDM', 'ZDN', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB']  # 8 subjects
+ZUCO1_VAL_SUBJECTS = ['ZKH', 'ZKW']    # 2 subjects
+ZUCO1_TEST_SUBJECTS = ['ZMG', 'ZPH']   # 2 subjects
+
+# ZuCo 2.0 Subject splits (18 subjects) - prefix Y
+ZUCO2_TRAIN_SUBJECTS = ['YAC', 'YAG', 'YAK', 'YDG', 'YDR', 'YFR', 'YFS', 'YHS', 'YIS', 'YLS', 'YMD', 'YMS']  # 12 subjects
+ZUCO2_VAL_SUBJECTS = ['YRH', 'YRK', 'YRP']    # 3 subjects  
+ZUCO2_TEST_SUBJECTS = ['YSD', 'YSL', 'YTL']   # 3 subjects
+
+# Combined splits
+TRAIN_SUBJECTS = ZUCO1_TRAIN_SUBJECTS + ZUCO2_TRAIN_SUBJECTS
+VAL_SUBJECTS = ZUCO1_VAL_SUBJECTS + ZUCO2_VAL_SUBJECTS
+TEST_SUBJECTS = ZUCO1_TEST_SUBJECTS + ZUCO2_TEST_SUBJECTS
 
 # Brain region channel mapping
 BRAIN_REGIONS = {

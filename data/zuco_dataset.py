@@ -1,10 +1,14 @@
 """
 PyTorch Dataset for pre-processed ZuCo data.
 Loads from .pt files created by scripts/prepare_pytorch_data.py
+
+Supports both single files and chunked files:
+- Single: train_data.pt, val_data.pt, test_data.pt
+- Chunked: train_data_chunk0.pt, train_data_chunk1.pt, ...
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from pathlib import Path
 from typing import Tuple, Dict, List
 
@@ -15,7 +19,7 @@ class ZuCoDataset(Dataset):
     
     Expects .pt files with structure:
         {
-            'eeg': Tensor (N, 105, 8),
+            'eeg': Tensor (N, 105, num_features),
             'texts': List[str],
             'subjects': List[str]
         }
@@ -28,7 +32,7 @@ class ZuCoDataset(Dataset):
         """
         data = torch.load(data_path, weights_only=False)
         
-        self.eeg = data['eeg']           # (N, 105, 8)
+        self.eeg = data['eeg']           # (N, 105, num_features)
         self.texts = data['texts']        # List[str]
         self.subjects = data['subjects']  # List[str]
         
@@ -55,6 +59,32 @@ def collate_fn(batch: List[Dict]) -> Dict:
     }
 
 
+def load_split_data(data_dir: Path, split: str) -> Dataset:
+    """
+    Load data for a split, automatically handling chunks if present.
+    
+    Tries in order:
+    1. Single file: {split}_data.pt
+    2. Chunked files: {split}_data_chunk0.pt, {split}_data_chunk1.pt, ...
+    """
+    # Try single file first
+    single_file = data_dir / f"{split}_data.pt"
+    if single_file.exists():
+        return ZuCoDataset(single_file)
+    
+    # Try chunked files
+    chunk_files = sorted(data_dir.glob(f"{split}_data_chunk*.pt"))
+    if chunk_files:
+        print(f"Loading {len(chunk_files)} chunks for {split}...")
+        datasets = [ZuCoDataset(f) for f in chunk_files]
+        return ConcatDataset(datasets)
+    
+    raise FileNotFoundError(
+        f"No data found for split '{split}'. "
+        f"Expected {single_file} or {split}_data_chunk*.pt files"
+    )
+
+
 def get_dataloaders(
     data_dir: str,
     batch_size: int = 32,
@@ -63,8 +93,11 @@ def get_dataloaders(
     """
     Create train/val/test dataloaders from processed data.
     
+    Automatically handles both single files and chunked files.
+    
     Args:
         data_dir: Directory containing train_data.pt, val_data.pt, test_data.pt
+                  OR train_data_chunk*.pt, val_data_chunk*.pt, test_data_chunk*.pt
         batch_size: Batch size
         num_workers: Number of data loading workers
         
@@ -73,9 +106,9 @@ def get_dataloaders(
     """
     data_dir = Path(data_dir)
     
-    train_dataset = ZuCoDataset(data_dir / "train_data.pt")
-    val_dataset = ZuCoDataset(data_dir / "val_data.pt")
-    test_dataset = ZuCoDataset(data_dir / "test_data.pt")
+    train_dataset = load_split_data(data_dir, "train")
+    val_dataset = load_split_data(data_dir, "val")
+    test_dataset = load_split_data(data_dir, "test")
     
     train_loader = DataLoader(
         train_dataset,
@@ -105,3 +138,4 @@ def get_dataloaders(
     )
     
     return train_loader, val_loader, test_loader
+
