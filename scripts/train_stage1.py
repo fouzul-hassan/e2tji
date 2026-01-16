@@ -2,7 +2,12 @@
 Stage 1: Self-supervised pretraining with masked EEG reconstruction.
 
 Usage:
-    python scripts/train_stage1.py --data_dir ./data/processed --epochs 100
+    # Auto-detect GPU and use optimal settings
+    python scripts/train_stage1.py --gpu_profile auto --epochs 100
+    
+    # Manually specify GPU profile
+    python scripts/train_stage1.py --gpu_profile t4 --epochs 100
+    python scripts/train_stage1.py --gpu_profile a4000 --epochs 100
 """
 
 import argparse
@@ -15,36 +20,65 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.zuco_dataset import get_dataloaders
 from models.pretraining_model import PretrainingModel
 from training.stage1_pretrain import train_stage1, evaluate_pretraining
+from utils.gpu_profiles import (
+    get_gpu_profile, 
+    auto_detect_gpu_profile, 
+    apply_gpu_optimizations,
+    print_profile_info
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Stage 1: Self-supervised Pretraining')
+    parser = argparse.ArgumentParser(
+        description='Stage 1: Self-supervised Pretraining',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GPU Profiles:
+  t4      - Tesla T4 (15GB) - Google Colab, most cloud
+  a4000   - NVIDIA A4000 Ada (16GB) - Workstations
+  a100    - NVIDIA A100 (40GB) - High-end compute
+  auto    - Auto-detect GPU and select profile
+  
+Examples:
+  python scripts/train_stage1.py --gpu_profile t4 --epochs 100
+  python scripts/train_stage1.py --gpu_profile auto --epochs 100
+        """
+    )
+    
+    # GPU Profile
+    parser.add_argument('--gpu_profile', type=str, default='auto',
+                        choices=['auto', 't4', 'a4000', 'a100', 'cpu'],
+                        help='GPU optimization profile (default: auto-detect)')
     
     # Data
     parser.add_argument('--data_dir', type=str, default='./data/processed',
                         help='Directory with processed .pt files')
-    parser.add_argument('--batch_size', type=int, default=8,
-                        help='Batch size (reduce for spectro data to avoid OOM)')
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--grad_accum_steps', type=int, default=4,
-                        help='Gradient accumulation steps (effective batch = batch_size * grad_accum_steps)')
-    parser.add_argument('--fp16', action='store_true',
-                        help='Use mixed precision training')
     
-    # Model
-    parser.add_argument('--embed_dim', type=int, default=128,
-                        help='Embedding dimension (128 for memory efficiency)')
-    parser.add_argument('--num_transformer_layers', type=int, default=2,
-                        help='Number of transformer layers')
-    parser.add_argument('--mask_ratio', type=float, default=0.15)
-    
-    # Training
+    # Training (can override profile defaults)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
+    
+    # Override options (optional, uses profile defaults if not set)
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Override profile batch size')
+    parser.add_argument('--grad_accum_steps', type=int, default=None,
+                        help='Override profile gradient accumulation')
+    parser.add_argument('--embed_dim', type=int, default=None,
+                        help='Override profile embedding dimension')
+    parser.add_argument('--num_transformer_layers', type=int, default=None,
+                        help='Override profile transformer layers')
+    parser.add_argument('--fp16', action='store_true', default=None,
+                        help='Force enable FP16')
+    parser.add_argument('--no_fp16', action='store_true',
+                        help='Force disable FP16')
+    
+    # Model
+    parser.add_argument('--mask_ratio', type=float, default=0.15)
     
     # Device
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--num_workers', type=int, default=None)
     
     args = parser.parse_args()
     
@@ -53,7 +87,32 @@ def main():
         print("CUDA not available, using CPU")
         args.device = 'cpu'
     
-    print(f"Device: {args.device}")
+    # Get GPU profile
+    if args.gpu_profile == 'auto':
+        profile = auto_detect_gpu_profile()
+    else:
+        profile = get_gpu_profile(args.gpu_profile)
+    
+    # Apply GPU optimizations
+    apply_gpu_optimizations(args.device, profile)
+    
+    # Use profile defaults, allow overrides
+    batch_size = args.batch_size if args.batch_size is not None else profile.batch_size
+    grad_accum_steps = args.grad_accum_steps if args.grad_accum_steps is not None else profile.grad_accum_steps
+    embed_dim = args.embed_dim if args.embed_dim is not None else profile.embed_dim
+    num_transformer_layers = args.num_transformer_layers if args.num_transformer_layers is not None else profile.num_transformer_layers
+    num_workers = args.num_workers if args.num_workers is not None else profile.num_workers
+    
+    # Handle FP16 flags
+    if args.no_fp16:
+        use_fp16 = False
+    elif args.fp16:
+        use_fp16 = True
+    else:
+        use_fp16 = profile.use_fp16
+    
+    # Print profile info
+    print_profile_info(profile)
     
     # Create save directory
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
@@ -62,8 +121,8 @@ def main():
     print("\nLoading data...")
     train_loader, val_loader, test_loader = get_dataloaders(
         args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers
+        batch_size=batch_size,
+        num_workers=num_workers
     )
     
     # Get EEG shape from first batch
@@ -82,13 +141,19 @@ def main():
     model = PretrainingModel(
         num_channels=num_channels,
         num_bands=num_features,
-        embed_dim=args.embed_dim,
-        num_transformer_layers=args.num_transformer_layers,
+        embed_dim=embed_dim,
+        num_transformer_layers=num_transformer_layers,
         mask_ratio=args.mask_ratio
     )
     
+    # Apply torch.compile if enabled and available (PyTorch 2.0+)
+    if profile.use_compile and hasattr(torch, 'compile'):
+        print("Applying torch.compile() optimization...")
+        model = torch.compile(model, mode='reduce-overhead')
+    
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
+    print(f"Effective batch size: {batch_size * grad_accum_steps}")
     
     # Train
     model = train_stage1(
@@ -99,8 +164,10 @@ def main():
         lr=args.lr,
         device=args.device,
         save_dir=args.save_dir,
-        grad_accum_steps=args.grad_accum_steps,
-        use_fp16=args.fp16
+        grad_accum_steps=grad_accum_steps,
+        use_fp16=use_fp16,
+        use_gradient_checkpointing=profile.use_gradient_checkpointing,
+        max_grad_norm=profile.max_grad_norm
     )
     
     # Final test evaluation

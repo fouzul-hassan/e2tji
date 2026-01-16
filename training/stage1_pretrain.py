@@ -92,7 +92,9 @@ def train_stage1(
     save_dir: str = './checkpoints',
     log_interval: int = 10,
     grad_accum_steps: int = 1,
-    use_fp16: bool = False
+    use_fp16: bool = False,
+    use_gradient_checkpointing: bool = False,
+    max_grad_norm: float = 1.0
 ) -> PretrainingModel:
     """
     Train Stage 1 pretraining model.
@@ -108,6 +110,8 @@ def train_stage1(
         log_interval: Log every N batches
         grad_accum_steps: Gradient accumulation steps
         use_fp16: Use mixed precision training
+        use_gradient_checkpointing: Enable gradient checkpointing for memory savings
+        max_grad_norm: Maximum gradient norm for clipping
         
     Returns:
         Trained model
@@ -116,11 +120,30 @@ def train_stage1(
     save_dir.mkdir(parents=True, exist_ok=True)
     
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    
+    # Enable gradient checkpointing if requested
+    if use_gradient_checkpointing:
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled")
+        elif hasattr(model.transformer, 'gradient_checkpointing_enable'):
+            model.transformer.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for transformer")
+    
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=lr, 
+        weight_decay=0.01,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
     
-    # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if use_fp16 and device == 'cuda' else None
+    # Mixed precision scaler - use new API if available
+    if use_fp16 and device == 'cuda':
+        scaler = torch.amp.GradScaler('cuda')
+    else:
+        scaler = None
     
     best_val_mse = float('inf')
     history = {'train_loss': [], 'val_mse': [], 'val_corr': [], 'val_snr': []}
@@ -153,7 +176,7 @@ def train_stage1(
             
             # Forward pass with optional mixed precision
             if use_fp16 and scaler is not None:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     reconstructed, loss, mask = model(eeg)
                     loss = loss / grad_accum_steps
                 scaler.scale(loss).backward()
@@ -167,9 +190,13 @@ def train_stage1(
             # Gradient accumulation step
             if (batch_idx + 1) % grad_accum_steps == 0:
                 if scaler is not None:
+                    # Unscale gradients before clipping
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                     optimizer.step()
                 optimizer.zero_grad()
             

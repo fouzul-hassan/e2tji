@@ -2,7 +2,12 @@
 Stage 2: EEG-Text alignment with VL-JEPA objective.
 
 Usage:
-    python scripts/train_stage2.py --data_dir ./data/processed --epochs 50
+    # Auto-detect GPU and use optimal settings
+    python scripts/train_stage2.py --gpu_profile auto --epochs 50
+    
+    # Manually specify GPU profile
+    python scripts/train_stage2.py --gpu_profile t4 --epochs 50
+    python scripts/train_stage2.py --gpu_profile a4000 --epochs 50
 """
 
 import argparse
@@ -15,19 +20,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.zuco_dataset import get_dataloaders
 from models.eeg2text_jepa import EEG2TextJEPA
 from training.stage2_alignment import train_stage2, evaluate_alignment
+from utils.gpu_profiles import (
+    get_gpu_profile, 
+    auto_detect_gpu_profile, 
+    apply_gpu_optimizations,
+    print_profile_info
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Stage 2: EEG-Text Alignment')
+    parser = argparse.ArgumentParser(
+        description='Stage 2: EEG-Text Alignment',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GPU Profiles:
+  t4      - Tesla T4 (15GB) - Google Colab, most cloud
+  a4000   - NVIDIA A4000 Ada (16GB) - Workstations
+  a100    - NVIDIA A100 (40GB) - High-end compute
+  auto    - Auto-detect GPU and select profile
+        """
+    )
+    
+    # GPU Profile
+    parser.add_argument('--gpu_profile', type=str, default='auto',
+                        choices=['auto', 't4', 'a4000', 'a100', 'cpu'],
+                        help='GPU optimization profile (default: auto-detect)')
     
     # Data
     parser.add_argument('--data_dir', type=str, default='./data/processed',
                         help='Directory with processed .pt files')
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--num_workers', type=int, default=4)
     
     # Model
-    parser.add_argument('--embed_dim', type=int, default=256)
     parser.add_argument('--text_encoder', type=str, 
                         default='sentence-transformers/all-MiniLM-L6-v2')
     parser.add_argument('--pretrained_path', type=str, default=None,
@@ -36,6 +59,11 @@ def main():
     # Training
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--lr', type=float, default=5e-5)
+    
+    # Override options
+    parser.add_argument('--batch_size', type=int, default=None)
+    parser.add_argument('--embed_dim', type=int, default=None)
+    parser.add_argument('--num_workers', type=int, default=None)
     
     # Device
     parser.add_argument('--device', type=str, default='cuda')
@@ -48,7 +76,22 @@ def main():
         print("CUDA not available, using CPU")
         args.device = 'cpu'
     
-    print(f"Device: {args.device}")
+    # Get GPU profile
+    if args.gpu_profile == 'auto':
+        profile = auto_detect_gpu_profile()
+    else:
+        profile = get_gpu_profile(args.gpu_profile)
+    
+    # Apply GPU optimizations
+    apply_gpu_optimizations(args.device, profile)
+    
+    # Use profile defaults, allow overrides
+    batch_size = args.batch_size if args.batch_size is not None else profile.batch_size
+    embed_dim = args.embed_dim if args.embed_dim is not None else profile.embed_dim
+    num_workers = args.num_workers if args.num_workers is not None else profile.num_workers
+    
+    # Print profile info
+    print_profile_info(profile)
     
     # Create save directory
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
@@ -63,8 +106,8 @@ def main():
     print("\nLoading data...")
     train_loader, val_loader, test_loader = get_dataloaders(
         args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers
+        batch_size=batch_size,
+        num_workers=num_workers
     )
     
     # Detect EEG shape from first batch
@@ -80,11 +123,16 @@ def main():
     print("="*60)
     
     model = EEG2TextJEPA(
-        embed_dim=args.embed_dim,
+        embed_dim=embed_dim,
         num_features=num_features,
         text_encoder_name=args.text_encoder,
         pretrained_path=args.pretrained_path
     )
+    
+    # Apply torch.compile if enabled
+    if profile.use_compile and hasattr(torch, 'compile'):
+        print("Applying torch.compile() optimization...")
+        model = torch.compile(model, mode='reduce-overhead')
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -99,7 +147,10 @@ def main():
         epochs=args.epochs,
         lr=args.lr,
         device=args.device,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        use_fp16=profile.use_fp16,
+        grad_accum_steps=profile.grad_accum_steps,
+        max_grad_norm=profile.max_grad_norm
     )
     
     # Final test evaluation

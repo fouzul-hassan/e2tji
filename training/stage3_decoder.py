@@ -151,7 +151,10 @@ def train_stage3(
     device: str = 'cuda',
     save_dir: str = './checkpoints',
     log_interval: int = 10,
-    eval_samples: int = 500
+    eval_samples: int = 500,
+    use_fp16: bool = False,
+    grad_accum_steps: int = 1,
+    max_grad_norm: float = 1.0
 ) -> EEG2TextDecoder:
     """
     Train Stage 3 decoder model.
@@ -166,6 +169,9 @@ def train_stage3(
         save_dir: Directory to save checkpoints
         log_interval: Log every N batches
         eval_samples: Max samples for evaluation (for speed)
+        use_fp16: Use mixed precision training
+        grad_accum_steps: Gradient accumulation steps
+        max_grad_norm: Maximum gradient norm for clipping
         
     Returns:
         Trained model
@@ -183,8 +189,13 @@ def train_stage3(
     optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
     
+    # Mixed precision scaler
+    scaler = torch.amp.GradScaler('cuda') if use_fp16 and device == 'cuda' else None
+    
     best_bleu4 = 0
     history = {'train_loss': [], 'val_bleu4': [], 'val_rougeL': []}
+    
+    effective_batch = train_loader.batch_size * grad_accum_steps
     
     print(f"\n{'='*60}")
     print("Stage 3: Text Decoder Fine-tuning")
@@ -192,6 +203,10 @@ def train_stage3(
     print(f"Device: {device}")
     print(f"Epochs: {epochs}")
     print(f"Learning rate: {lr}")
+    print(f"Batch size: {train_loader.batch_size}")
+    print(f"Gradient accumulation: {grad_accum_steps}")
+    print(f"Effective batch size: {effective_batch}")
+    print(f"Mixed precision: {use_fp16}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"{'='*60}\n")
@@ -200,22 +215,40 @@ def train_stage3(
         # Training
         model.train()
         train_loss = 0
+        optimizer.zero_grad()
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for batch_idx, batch in enumerate(pbar):
             eeg = batch['eeg'].to(device)
             texts = batch['text']
             
-            optimizer.zero_grad()
-            outputs = model(eeg, texts=texts)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
+            # Forward pass with optional mixed precision
+            if use_fp16 and scaler is not None:
+                with torch.amp.autocast('cuda'):
+                    outputs = model(eeg, texts=texts)
+                    loss = outputs.loss / grad_accum_steps
+                scaler.scale(loss).backward()
+            else:
+                outputs = model(eeg, texts=texts)
+                loss = outputs.loss / grad_accum_steps
+                loss.backward()
             
-            train_loss += loss.item()
+            train_loss += loss.item() * grad_accum_steps
+            
+            # Gradient accumulation step
+            if (batch_idx + 1) % grad_accum_steps == 0:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                    optimizer.step()
+                optimizer.zero_grad()
             
             if batch_idx % log_interval == 0:
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                pbar.set_postfix({'loss': f'{loss.item() * grad_accum_steps:.4f}'})
         
         train_loss /= len(train_loader)
         history['train_loss'].append(train_loss)
