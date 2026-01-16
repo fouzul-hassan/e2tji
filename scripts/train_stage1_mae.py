@@ -1,28 +1,25 @@
-#!/usr/bin/env python3
 """
-Stage 1: JEPA Self-Supervised Pretraining CLI.
-
-This is TRUE JEPA - predicts in latent space with EMA target encoder.
-For MAE (pixel-space reconstruction), use train_stage1_mae.py.
+Stage 1: Self-supervised pretraining with masked EEG reconstruction.
 
 Usage:
+    # Auto-detect GPU and use optimal settings
+    python scripts/train_stage1.py --gpu_profile auto --epochs 100
+    
+    # Manually specify GPU profile
     python scripts/train_stage1.py --gpu_profile t4 --epochs 100
-    python scripts/train_stage1.py --gpu_profile rtx4000 --epochs 100 --ema_momentum 0.996
+    python scripts/train_stage1.py --gpu_profile a4000 --epochs 100
 """
 
 import argparse
-import sys
+import torch
 from pathlib import Path
+import sys
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import torch
-from torch.utils.data import DataLoader
-
-from models.pretraining_jepa import JEPAPretrainingModel
-from training.stage1_jepa import train_stage1_jepa, evaluate_jepa
 from data.zuco_dataset import get_dataloaders
+from models.pretraining_model import PretrainingModel
+from training.stage1_pretrain import train_stage1, evaluate_pretraining
 from utils.gpu_profiles import (
     get_gpu_profile, 
     auto_detect_gpu_profile, 
@@ -33,7 +30,19 @@ from utils.gpu_profiles import (
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Stage 1: JEPA Self-Supervised Pretraining (Latent Prediction)'
+        description='Stage 1: Self-supervised Pretraining',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+GPU Profiles:
+  t4      - Tesla T4 (15GB) - Google Colab, most cloud
+  a4000   - NVIDIA A4000 Ada (16GB) - Workstations
+  a100    - NVIDIA A100 (40GB) - High-end compute
+  auto    - Auto-detect GPU and select profile
+  
+Examples:
+  python scripts/train_stage1.py --gpu_profile t4 --epochs 100
+  python scripts/train_stage1.py --gpu_profile auto --epochs 100
+        """
     )
     
     # GPU Profile
@@ -56,22 +65,15 @@ def main():
                         help='Override profile gradient accumulation')
     parser.add_argument('--embed_dim', type=int, default=None,
                         help='Override profile embedding dimension')
-    parser.add_argument('--num_encoder_layers', type=int, default=None,
-                        help='Override profile encoder layers')
+    parser.add_argument('--num_transformer_layers', type=int, default=None,
+                        help='Override profile transformer layers')
     parser.add_argument('--fp16', action='store_true', default=None,
                         help='Force enable FP16')
     parser.add_argument('--no_fp16', action='store_true',
                         help='Force disable FP16')
     
-    # JEPA-specific
-    parser.add_argument('--ema_momentum', type=float, default=0.996,
-                        help='EMA momentum for target encoder')
-    parser.add_argument('--context_ratio', type=float, default=0.6,
-                        help='Ratio of context regions (vs target)')
-    parser.add_argument('--predictor_dim', type=int, default=128,
-                        help='Predictor hidden dimension')
-    parser.add_argument('--num_predictor_layers', type=int, default=4,
-                        help='Number of predictor transformer layers')
+    # Model
+    parser.add_argument('--mask_ratio', type=float, default=0.15)
     
     # Device
     parser.add_argument('--device', type=str, default='cuda')
@@ -93,19 +95,17 @@ def main():
     else:
         profile = get_gpu_profile(args.gpu_profile)
     
-    print_profile_info(profile)
-    
     # Apply GPU optimizations
     apply_gpu_optimizations(args.device, profile)
     
-    # Get settings (use overrides if provided, else profile defaults)
-    batch_size = args.batch_size or profile.batch_size
-    grad_accum_steps = args.grad_accum_steps or profile.grad_accum_steps
-    embed_dim = args.embed_dim or profile.embed_dim
-    num_encoder_layers = args.num_encoder_layers or profile.num_transformer_layers
-    num_workers = args.num_workers or profile.num_workers
+    # Use profile defaults, allow overrides
+    batch_size = args.batch_size if args.batch_size is not None else profile.batch_size
+    grad_accum_steps = args.grad_accum_steps if args.grad_accum_steps is not None else profile.grad_accum_steps
+    embed_dim = args.embed_dim if args.embed_dim is not None else profile.embed_dim
+    num_transformer_layers = args.num_transformer_layers if args.num_transformer_layers is not None else profile.num_transformer_layers
+    num_workers = args.num_workers if args.num_workers is not None else profile.num_workers
     
-    # Handle FP16
+    # Handle FP16 flags
     if args.no_fp16:
         use_fp16 = False
     elif args.fp16:
@@ -113,52 +113,61 @@ def main():
     else:
         use_fp16 = profile.use_fp16
     
+    # Print profile info
+    print_profile_info(profile)
+    
+    # Create save directory
+    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+    
     # Load data
     print("\nLoading data...")
     train_loader, val_loader, test_loader = get_dataloaders(
-        data_dir=args.data_dir,
+        args.data_dir,
         batch_size=batch_size,
         num_workers=num_workers
     )
     
-    # Get feature dimensions from data
-    sample = next(iter(train_loader))
-    num_channels = sample['eeg'].shape[1]
-    num_features = sample['eeg'].shape[2]
-    print(f"EEG shape: {sample['eeg'].shape}")
+    # Get EEG shape from first batch
+    sample_batch = next(iter(train_loader))
+    eeg_shape = sample_batch['eeg'].shape
+    print(f"EEG shape: {eeg_shape}")  # (B, channels, features)
     
+    num_channels = eeg_shape[1]
+    num_features = eeg_shape[2]
+    
+    # Create model
     print("\n" + "="*60)
-    print("STAGE 1: JEPA SELF-SUPERVISED PRETRAINING")
+    print("STAGE 1: SELF-SUPERVISED PRETRAINING")
     print("="*60)
     
-    model = JEPAPretrainingModel(
+    model = PretrainingModel(
         num_channels=num_channels,
-        num_features=num_features,
+        num_bands=num_features,
         embed_dim=embed_dim,
-        num_encoder_layers=num_encoder_layers,
-        num_predictor_layers=args.num_predictor_layers,
-        predictor_dim=args.predictor_dim,
-        context_ratio=args.context_ratio,
-        ema_momentum=args.ema_momentum
+        num_transformer_layers=num_transformer_layers,
+        mask_ratio=args.mask_ratio
     )
     
+    # Apply torch.compile if enabled and available (PyTorch 2.0+)
+    if profile.use_compile and hasattr(torch, 'compile'):
+        print("Applying torch.compile() optimization...")
+        model = torch.compile(model, mode='reduce-overhead')
+    
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Model parameters: {total_params:,}")
     print(f"Effective batch size: {batch_size * grad_accum_steps}")
     
     # Determine resume path
     resume_path = None
     if args.resume:
-        checkpoint_path = Path(args.save_dir) / 'stage1_jepa_best.pt'
+        checkpoint_path = Path(args.save_dir) / 'stage1_best.pt'
         if checkpoint_path.exists():
             resume_path = str(checkpoint_path)
         else:
             print("⚠ No checkpoint found to resume from, starting fresh")
     
     # Train
-    model = train_stage1_jepa(
+    model = train_stage1(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -168,7 +177,7 @@ def main():
         save_dir=args.save_dir,
         grad_accum_steps=grad_accum_steps,
         use_fp16=use_fp16,
-        ema_momentum=args.ema_momentum,
+        use_gradient_checkpointing=profile.use_gradient_checkpointing,
         max_grad_norm=profile.max_grad_norm,
         resume_path=resume_path
     )
@@ -177,12 +186,14 @@ def main():
     print("\n" + "="*60)
     print("FINAL TEST EVALUATION")
     print("="*60)
-    test_metrics = evaluate_jepa(model, test_loader, args.device)
-    print(f"Test MSE: {test_metrics['mse']:.4f}")
-    print(f"Test Cosine Similarity: {test_metrics['cosine_sim']:.4f}")
     
-    print("\n✓ Stage 1 JEPA pretraining complete!")
-    print(f"  Best model saved to: {args.save_dir}/stage1_jepa_best.pt")
+    test_metrics = evaluate_pretraining(model, test_loader, args.device)
+    print(f"Test MSE: {test_metrics['mse']:.4f}")
+    print(f"Test Correlation: {test_metrics['correlation']:.4f}")
+    print(f"Test SNR: {test_metrics['snr_db']:.2f} dB")
+    
+    print(f"\n✓ Stage 1 complete! Checkpoint saved to: {args.save_dir}/stage1_best.pt")
+    print("\nNext step: Run train_stage2.py")
 
 
 if __name__ == '__main__':
