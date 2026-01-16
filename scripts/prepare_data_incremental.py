@@ -97,6 +97,10 @@ def normalize_pickle_data(data) -> List[Dict]:
 
 def extract_sentence_eeg(sentence_obj: Dict, max_time_samples: int = 500) -> Optional[np.ndarray]:
     """Extract EEG features from sentence object."""
+    # Handle None sentences
+    if sentence_obj is None:
+        return None
+    
     eeg_data = sentence_obj.get('sentence_level_EEG', {})
     
     # Spectro format (rawData)
@@ -184,6 +188,11 @@ def process_single_pickle(pickle_path: Path, output_dir: Path, mode: str = 'appe
         split = subject_to_split.get(subject_id, 'train')
         
         for sentence in subject_data['sentence']:
+            # Skip None sentences
+            if sentence is None:
+                stats['skipped'] += 1
+                continue
+            
             eeg = extract_sentence_eeg(sentence)
             if eeg is None:
                 stats['skipped'] += 1
