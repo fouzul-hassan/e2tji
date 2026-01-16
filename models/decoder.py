@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from typing import List, Optional
 from transformers import BartForConditionalGeneration, BartTokenizer
+from transformers.modeling_outputs import BaseModelOutput
 
 
 class EEG2TextDecoder(nn.Module):
@@ -87,9 +88,12 @@ class EEG2TextDecoder(nn.Module):
             dtype=torch.long
         )
         
+        # Wrap encoder outputs in BaseModelOutput
+        encoder_outputs = BaseModelOutput(last_hidden_state=encoder_hidden)
+        
         # BART forward with encoder outputs
         outputs = self.bart(
-            encoder_outputs=(encoder_hidden,),
+            encoder_outputs=encoder_outputs,
             attention_mask=encoder_attention_mask,
             labels=labels
         )
@@ -130,9 +134,12 @@ class EEG2TextDecoder(nn.Module):
             dtype=torch.long
         )
         
+        # Wrap encoder outputs in BaseModelOutput (required by transformers)
+        encoder_outputs = BaseModelOutput(last_hidden_state=encoder_hidden)
+        
         # Generate
         generated_ids = self.bart.generate(
-            encoder_outputs=(encoder_hidden,),
+            encoder_outputs=encoder_outputs,
             attention_mask=encoder_attention_mask,
             max_length=max_length,
             num_beams=num_beams,
@@ -144,3 +151,4 @@ class EEG2TextDecoder(nn.Module):
         texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         
         return texts
+
