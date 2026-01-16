@@ -73,7 +73,8 @@ def train_stage1_jepa(
     use_fp16: bool = False,
     ema_momentum: float = 0.996,
     max_grad_norm: float = 1.0,
-    resume_path: str = None
+    resume_path: str = None,
+    early_stopping_patience: int = 10
 ) -> JEPAPretrainingModel:
     """
     Train Stage 1 JEPA pretraining model.
@@ -92,6 +93,7 @@ def train_stage1_jepa(
         ema_momentum: Momentum for EMA target encoder update
         max_grad_norm: Maximum gradient norm for clipping
         resume_path: Path to checkpoint to resume from
+        early_stopping_patience: Stop if no improvement for N epochs (0 = disabled)
         
     Returns:
         Trained model
@@ -147,6 +149,9 @@ def train_stage1_jepa(
     
     effective_batch = train_loader.batch_size * grad_accum_steps
     
+    # Early stopping counter
+    epochs_without_improvement = 0
+    
     print(f"\n{'='*60}")
     print("Stage 1: JEPA Self-Supervised Pretraining")
     print(f"{'='*60}")
@@ -159,6 +164,7 @@ def train_stage1_jepa(
     print(f"Mixed precision: {use_fp16}")
     print(f"EMA momentum: {ema_momentum}")
     print(f"Context ratio: {model.context_ratio}")
+    print(f"Early stopping patience: {early_stopping_patience}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"{'='*60}\n")
@@ -227,6 +233,7 @@ def train_stage1_jepa(
         # Save best model
         if val_metrics['mse'] < best_val_loss:
             best_val_loss = val_metrics['mse']
+            epochs_without_improvement = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -234,6 +241,14 @@ def train_stage1_jepa(
                 'val_metrics': val_metrics,
             }, save_dir / 'stage1_jepa_best.pt')
             print(f"  ✓ Saved best model (MSE: {best_val_loss:.4f})")
+        else:
+            epochs_without_improvement += 1
+            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+        
+        # Early stopping check
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            print(f"\n⚠ Early stopping triggered: no improvement for {early_stopping_patience} epochs")
+            break
     
     # Load best model
     best_path = save_dir / 'stage1_jepa_best.pt'
