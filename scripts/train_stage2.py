@@ -43,7 +43,7 @@ GPU Profiles:
     
     # GPU Profile
     parser.add_argument('--gpu_profile', type=str, default='auto',
-                        choices=['auto', 't4', 'a4000', 'a100', 'cpu'],
+                        choices=['auto', 't4', 'a4000', 'rtx4000', 'a100', 'cpu'],
                         help='GPU optimization profile (default: auto-detect)')
     
     # Data

@@ -102,6 +102,32 @@ A4000_PROFILE = GPUProfile(
     max_grad_norm=1.0,
 )
 
+# NVIDIA RTX 4000 Ada - 20GB VRAM (Optimized for your specs)
+RTX4000_ADA_PROFILE = GPUProfile(
+    name="NVIDIA RTX 4000 Ada 20GB",
+    vram_gb=20,
+    
+    # Batch settings - larger batches for 20GB
+    batch_size=16,
+    grad_accum_steps=4,  # Effective batch = 64
+    
+    # Model settings - larger model capacity
+    embed_dim=512,
+    num_transformer_layers=8,
+    global_transformer_layers=8,
+    
+    # Memory optimizations
+    use_fp16=True,
+    use_gradient_checkpointing=False,  # Less needed with 20GB
+    use_compile=True,  # Ada architecture benefits from torch.compile
+    
+    # DataLoader - more workers for 62GB RAM + 16 vCPU
+    num_workers=12,
+    pin_memory=True,
+    
+    max_grad_norm=1.0,
+)
+
 # A100 - 40GB/80GB (for reference)
 A100_40GB_PROFILE = GPUProfile(
     name="NVIDIA A100 40GB",
@@ -151,6 +177,7 @@ CPU_PROFILE = GPUProfile(
 GPU_PROFILES = {
     "t4": T4_PROFILE,
     "a4000": A4000_PROFILE,
+    "rtx4000": RTX4000_ADA_PROFILE,
     "a100": A100_40GB_PROFILE,
     "cpu": CPU_PROFILE,
 }
@@ -180,18 +207,24 @@ def auto_detect_gpu_profile() -> GPUProfile:
     # Match by name
     if "t4" in gpu_name:
         return T4_PROFILE
-    elif "a4000" in gpu_name or "ada" in gpu_name:
+    elif "rtx 4000" in gpu_name or ("4000" in gpu_name and "ada" in gpu_name):
+        return RTX4000_ADA_PROFILE
+    elif "a4000" in gpu_name:
         return A4000_PROFILE
     elif "a100" in gpu_name:
         return A100_40GB_PROFILE
     elif "v100" in gpu_name or "p100" in gpu_name:
         return T4_PROFILE  # Similar specs to T4
     
-    # Match by VRAM
+    # Match by VRAM (smarter thresholds)
     if total_memory >= 35:
         return A100_40GB_PROFILE
+    elif total_memory >= 18:
+        return RTX4000_ADA_PROFILE  # 20GB class
     elif total_memory >= 14:
-        return T4_PROFILE  # Conservative
+        return A4000_PROFILE  # 16GB class
+    elif total_memory >= 12:
+        return T4_PROFILE  # 15GB class
     else:
         print(f"Warning: Small GPU ({total_memory:.1f}GB), using CPU profile")
         return CPU_PROFILE
