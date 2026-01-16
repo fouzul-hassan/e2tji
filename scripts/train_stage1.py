@@ -79,6 +79,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=None)
     parser.add_argument('--resume', action='store_true',
                         help='Resume training from last checkpoint')
+    parser.add_argument('--early_stopping', type=int, default=10,
+                        help='Early stopping patience (epochs without improvement, 0=disabled)')
     
     args = parser.parse_args()
     
@@ -170,7 +172,8 @@ def main():
         use_fp16=use_fp16,
         ema_momentum=args.ema_momentum,
         max_grad_norm=profile.max_grad_norm,
-        resume_path=resume_path
+        resume_path=resume_path,
+        early_stopping_patience=args.early_stopping
     )
     
     # Final test evaluation
