@@ -1,0 +1,267 @@
+@startuml EEG2Text_JEPA_Architecture
+
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle uml2
+skinparam linetype ortho
+
+title **EEG2Text JEPA - Complete Architecture**\n(3-Stage Training Pipeline)
+
+' ============================================================================
+' DATA LAYER
+' ============================================================================
+package "Data Layer" #E8F5E9 {
+    database "ZuCo Dataset\n(.pickle files)" as zuco {
+        folder "task1-SR" as t1
+        folder "task2-NR" as t2
+        folder "task3-TSR" as t3
+    }
+    
+    artifact "Preprocessed Data\n(.pt files)" as processed {
+        file "train_data.pt\n(5199 samples)" as train_pt
+        file "val_data.pt\n(1381 samples)" as val_pt
+        file "test_data.pt\n(1313 samples)" as test_pt
+    }
+    
+    component "prepare_pytorch_data.py" as prep_script #BBDEFB {
+        note right
+            - Extract sentence_level_EEG
+            - Subject-based splitting
+            - Per-channel normalization
+            - Handle spectro (105, 500)
+              or regular (105, 8) format
+        end note
+    }
+    
+    zuco --> prep_script
+    prep_script --> processed
+}
+
+' ============================================================================
+' STAGE 1: SELF-SUPERVISED PRETRAINING
+' ============================================================================
+package "Stage 1: Self-Supervised Pretraining" #FFF3E0 {
+    
+    rectangle "Input EEG\n(B, 105, 500)" as stage1_input #FFE0B2
+    
+    package "PretrainingModel" #FFE082 {
+        
+        rectangle "Masking\n(15% channels)" as mask #FFCC80
+        
+        package "CNN Encoder" as cnn_enc #FFA726 {
+            rectangle "Conv2D(1→64)\nk=5, s=2" as conv1
+            rectangle "Conv2D(64→128)\nk=5, s=2" as conv2
+            rectangle "Conv2D(128→256)\nk=5, s=2" as conv3
+            rectangle "Flatten + Linear\n→ embed_dim" as proj1
+            
+            conv1 --> conv2
+            conv2 --> conv3
+            conv3 --> proj1
+        }
+        
+        package "Conv Transformer" as conv_trans #FB8C00 {
+            rectangle "TransformerEncoder\n(2 layers, 8 heads)" as trans1
+            rectangle "LayerNorm" as ln1
+            
+            trans1 --> ln1
+        }
+        
+        package "CNN Decoder" as cnn_dec #EF6C00 {
+            rectangle "Linear\n→ feat_size" as expand
+            rectangle "ConvTranspose2D\n(256→128→64→1)" as deconv
+            rectangle "Interpolate\nto (105, 500)" as interp
+            
+            expand --> deconv
+            deconv --> interp
+        }
+        
+        mask --> cnn_enc
+        cnn_enc --> conv_trans
+        conv_trans --> cnn_dec
+    }
+    
+    rectangle "Reconstructed EEG\n(B, 105, 500)" as stage1_output #FFE0B2
+    
+    rectangle "**Loss: MSE**\n(reconstruction)" as loss1 #FF7043
+    
+    stage1_input --> mask
+    cnn_dec --> stage1_output
+    stage1_output ..> loss1 : compare
+    stage1_input ..> loss1 : with original
+    
+    note right of loss1
+        **Metrics:**
+        - MSE
+        - Pearson Correlation
+        - SNR (dB)
+    end note
+}
+
+' ============================================================================
+' STAGE 2: EEG-TEXT ALIGNMENT (VL-JEPA)
+' ============================================================================
+package "Stage 2: EEG-Text Alignment (VL-JEPA)" #E3F2FD {
+    
+    rectangle "Input EEG\n(B, 105, 500)" as stage2_eeg #BBDEFB
+    rectangle "Input Text\n(sentences)" as stage2_text #BBDEFB
+    
+    package "EEG2TextJEPA" #90CAF9 {
+        
+        package "Multi-View Transformer" #64B5F6 {
+            
+            note top
+                Splits EEG into 10 brain regions:
+                - Prefrontal L/R (0-10, 11-21)
+                - Frontal L/R (22-32, 33-43)
+                - Central L/R (44-54, 55-65)
+                - Temporal L/R (66-76, 77-87)
+                - Parietal-Occipital L/R (88-96, 97-104)
+            end note
+            
+            package "Region Encoders (x10)" #42A5F5 {
+                rectangle "Conv1D(ch→64)\nk=15, s=5" as reg_conv1
+                rectangle "Conv1D(64→128)\nk=7, s=3" as reg_conv2
+                rectangle "AdaptiveAvgPool1d(8)" as reg_pool
+                rectangle "Linear(1024→embed)" as reg_proj
+                
+                reg_conv1 --> reg_conv2
+                reg_conv2 --> reg_pool
+                reg_pool --> reg_proj
+            }
+            
+            rectangle "Region Embeddings\n(learnable, 10 x embed)" as region_embed #2196F3
+            
+            package "Global Transformer" #1E88E5 {
+                rectangle "TransformerEncoder\n(4 layers, 8 heads)" as global_trans
+                rectangle "LayerNorm" as ln2
+                rectangle "Mean Pool\nacross regions" as mean_pool
+                
+                global_trans --> ln2
+                ln2 --> mean_pool
+            }
+        }
+        
+        package "Predictor MLP" #1565C0 {
+            rectangle "Linear(embed→embed*2)" as pred1
+            rectangle "LayerNorm + GELU + Dropout" as pred2
+            rectangle "Linear(embed*2→text_embed)" as pred3
+            rectangle "LayerNorm + L2 Normalize" as pred4
+            
+            pred1 --> pred2
+            pred2 --> pred3
+            pred3 --> pred4
+        }
+    }
+    
+    package "Text Encoder (Frozen)" #E1BEE7 {
+        rectangle "SentenceTransformer\n(all-MiniLM-L6-v2)" as sent_trans #CE93D8
+        rectangle "Output: (B, 384)" as text_out #BA68C8
+        
+        sent_trans --> text_out
+    }
+    
+    rectangle "Predicted Embedding\n(B, 384)" as pred_embed #64B5F6
+    rectangle "Target Embedding\n(B, 384)" as target_embed #CE93D8
+    
+    rectangle "**Loss: L2 + Cosine**\nin embedding space" as loss2 #42A5F5
+    
+    stage2_eeg --> "Multi-View Transformer"
+    "Multi-View Transformer" --> "Predictor MLP"
+    "Predictor MLP" --> pred_embed
+    
+    stage2_text --> sent_trans
+    text_out --> target_embed
+    
+    pred_embed ..> loss2
+    target_embed ..> loss2
+    
+    note right of loss2
+        **Metrics:**
+        - Cosine Similarity
+        - Retrieval Acc@1/5/10
+        - Mean Reciprocal Rank
+    end note
+}
+
+' ============================================================================
+' STAGE 3: TEXT DECODER
+' ============================================================================
+package "Stage 3: Text Decoder Fine-tuning" #FCE4EC {
+    
+    rectangle "Input EEG\n(B, 105, 500)" as stage3_eeg #F8BBD9
+    
+    package "EEG2TextDecoder" #F48FB1 {
+        
+        rectangle "Frozen JEPA\n(from Stage 2)" as frozen_jepa #CE93D8 {
+            rectangle "Multi-View Trans" as mvt2
+            rectangle "Predictor" as pred_frozen
+            
+            mvt2 --> pred_frozen
+        }
+        
+        package "Embedding Projection" #EC407A {
+            rectangle "Linear(384→768)" as embed_proj1
+            rectangle "LayerNorm + GELU" as embed_proj2
+            rectangle "Linear(768→768)" as embed_proj3
+            
+            embed_proj1 --> embed_proj2
+            embed_proj2 --> embed_proj3
+        }
+        
+        package "BART Decoder" #D81B60 {
+            rectangle "BART Encoder Hidden\n(B, 1, 768)" as bart_enc
+            rectangle "BART Decoder\n(cross-attention)" as bart_dec
+            rectangle "LM Head\n→ vocabulary" as lm_head
+            
+            bart_enc --> bart_dec
+            bart_dec --> lm_head
+        }
+    }
+    
+    rectangle "Generated Text" as gen_text #F8BBD9
+    rectangle "Target Text" as tgt_text #F8BBD9
+    
+    rectangle "**Loss: Cross-Entropy**\n(teacher forcing)" as loss3 #E91E63
+    
+    stage3_eeg --> frozen_jepa
+    frozen_jepa --> "Embedding Projection"
+    "Embedding Projection" --> bart_enc
+    lm_head --> gen_text
+    
+    gen_text ..> loss3
+    tgt_text ..> loss3
+    
+    note right of loss3
+        **Metrics:**
+        - BLEU-1/2/3/4
+        - ROUGE-1/2/L
+        - BERTScore
+    end note
+}
+
+' ============================================================================
+' CONNECTIONS BETWEEN STAGES
+' ============================================================================
+
+processed --> stage1_input : DataLoader
+stage1_output -[hidden]-> stage2_eeg
+processed --> stage2_eeg : DataLoader
+processed --> stage3_eeg : DataLoader
+
+' Checkpoint flow
+loss1 ..> stage2_eeg : "stage1_best.pt\n(pretrained weights)" #888888
+loss2 ..> frozen_jepa : "stage2_best.pt\n(frozen JEPA)" #888888
+
+' ============================================================================
+' LEGEND
+' ============================================================================
+legend right
+    |= Color |= Meaning |
+    | <#FFE082> | Stage 1: Pretraining |
+    | <#64B5F6> | Stage 2: Alignment |
+    | <#F48FB1> | Stage 3: Decoding |
+    | <#CE93D8> | Frozen Components |
+    | Dashed | Loss/Data Flow |
+endlegend
+
+@enduml

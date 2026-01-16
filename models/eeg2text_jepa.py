@@ -255,7 +255,8 @@ class EEG2TextJEPA(nn.Module):
                 convert_to_tensor=True,
                 normalize_embeddings=True
             )
-        return embeddings
+        # Clone to avoid inference-mode tensor issues with autograd
+        return embeddings.clone()
     
     def forward(self, 
                 eeg: torch.Tensor, 
