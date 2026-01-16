@@ -79,6 +79,8 @@ Examples:
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
     parser.add_argument('--num_workers', type=int, default=None)
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume training from last checkpoint')
     
     args = parser.parse_args()
     
@@ -155,6 +157,15 @@ Examples:
     print(f"Model parameters: {total_params:,}")
     print(f"Effective batch size: {batch_size * grad_accum_steps}")
     
+    # Determine resume path
+    resume_path = None
+    if args.resume:
+        checkpoint_path = Path(args.save_dir) / 'stage1_best.pt'
+        if checkpoint_path.exists():
+            resume_path = str(checkpoint_path)
+        else:
+            print("⚠ No checkpoint found to resume from, starting fresh")
+    
     # Train
     model = train_stage1(
         model=model,
@@ -167,7 +178,8 @@ Examples:
         grad_accum_steps=grad_accum_steps,
         use_fp16=use_fp16,
         use_gradient_checkpointing=profile.use_gradient_checkpointing,
-        max_grad_norm=profile.max_grad_norm
+        max_grad_norm=profile.max_grad_norm,
+        resume_path=resume_path
     )
     
     # Final test evaluation

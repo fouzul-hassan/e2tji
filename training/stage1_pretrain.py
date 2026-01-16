@@ -94,7 +94,8 @@ def train_stage1(
     grad_accum_steps: int = 1,
     use_fp16: bool = False,
     use_gradient_checkpointing: bool = False,
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 1.0,
+    resume_path: str = None
 ) -> PretrainingModel:
     """
     Train Stage 1 pretraining model.
@@ -112,6 +113,7 @@ def train_stage1(
         use_fp16: Use mixed precision training
         use_gradient_checkpointing: Enable gradient checkpointing for memory savings
         max_grad_norm: Maximum gradient norm for clipping
+        resume_path: Path to checkpoint to resume from
         
     Returns:
         Trained model
@@ -137,7 +139,28 @@ def train_stage1(
         betas=(0.9, 0.999),
         eps=1e-8
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    best_val_mse = float('inf')
+    history = {'train_loss': [], 'val_mse': [], 'val_corr': [], 'val_snr': []}
+    
+    if resume_path and Path(resume_path).exists():
+        print(f"Resuming from checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_mse = checkpoint['val_metrics'].get('mse', float('inf'))
+        
+        # Load history if available
+        history_path = save_dir / 'stage1_history.pt'
+        if history_path.exists():
+            history = torch.load(history_path, weights_only=False)
+        
+        print(f"  Resumed from epoch {start_epoch}, best MSE: {best_val_mse:.4f}")
+    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs, last_epoch=start_epoch-1 if start_epoch > 0 else -1)
     
     # Mixed precision scaler - use new API if available
     if use_fp16 and device == 'cuda':
@@ -145,16 +168,13 @@ def train_stage1(
     else:
         scaler = None
     
-    best_val_mse = float('inf')
-    history = {'train_loss': [], 'val_mse': [], 'val_corr': [], 'val_snr': []}
-    
     effective_batch = train_loader.batch_size * grad_accum_steps
     
     print(f"\n{'='*60}")
     print("Stage 1: Self-Supervised Pretraining")
     print(f"{'='*60}")
     print(f"Device: {device}")
-    print(f"Epochs: {epochs}")
+    print(f"Epochs: {start_epoch+1}-{epochs} (total {epochs})")
     print(f"Learning rate: {lr}")
     print(f"Batch size: {train_loader.batch_size}")
     print(f"Gradient accumulation: {grad_accum_steps}")
@@ -164,7 +184,7 @@ def train_stage1(
     print(f"Val samples: {len(val_loader.dataset)}")
     print(f"{'='*60}\n")
     
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         # Training
         model.train()
         train_loss = 0

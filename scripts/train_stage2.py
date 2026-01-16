@@ -68,6 +68,8 @@ GPU Profiles:
     # Device
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume training from last checkpoint')
     
     args = parser.parse_args()
     
