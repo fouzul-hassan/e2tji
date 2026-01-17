@@ -456,39 +456,41 @@ class JEPAPretrainingModel(nn.Module):
         # Predict target latents from context
         predicted_latents = self.predictor(context_transformed, context_mask)  # (B, num_tgt, D)
         
-        # Normalize for stability
-        predicted_latents = F.normalize(predicted_latents, p=2, dim=-1)
-        target_latents = F.normalize(target_latents.detach(), p=2, dim=-1)
-        
         # ============================================================
         # VICReg-style loss (Variance-Invariance-Covariance Regularization)
+        # STRONGER VERSION - no L2 normalization, original VICReg weights
         # ============================================================
         
-        # 1. Invariance loss (MSE between predicted and target)
-        mse_loss = F.mse_loss(predicted_latents, target_latents)
-        
-        # 2. Variance loss (encourage high variance to prevent collapse)
-        # Flatten to (N, D) for variance computation
+        # DO NOT normalize - let VICReg handle the scale
+        # Flatten to (N, D) for loss computation
         pred_flat = predicted_latents.reshape(-1, self.embed_dim)  # (B*num_tgt, D)
+        target_flat = target_latents.detach().reshape(-1, self.embed_dim)  # (B*num_tgt, D)
         
-        # Variance per dimension (want variance >= 1)
+        # 1. Invariance loss (MSE between predicted and target)
+        # Normalize only for MSE to keep scale reasonable
+        pred_norm = F.normalize(pred_flat, p=2, dim=-1)
+        target_norm = F.normalize(target_flat, p=2, dim=-1)
+        mse_loss = F.mse_loss(pred_norm, target_norm)
+        
+        # 2. Variance loss (encourage variance >= 1 per dimension)
+        # Use standard deviation, target std = 1
         pred_std = torch.sqrt(pred_flat.var(dim=0) + 1e-4)  # (D,)
-        var_loss = torch.mean(F.relu(1 - pred_std))  # Hinge loss: penalize low variance
+        var_loss = torch.mean(F.relu(1 - pred_std))  # Hinge loss
         
         # 3. Covariance loss (decorrelate dimensions)
         pred_centered = pred_flat - pred_flat.mean(dim=0)
         cov = (pred_centered.T @ pred_centered) / (pred_flat.size(0) - 1)  # (D, D)
-        # Zero out diagonal and compute off-diagonal loss
-        off_diag = cov.masked_fill(torch.eye(self.embed_dim, device=cov.device).bool(), 0)
-        cov_loss = (off_diag ** 2).sum() / self.embed_dim
+        # Off-diagonal elements should be zero
+        off_diag_mask = ~torch.eye(self.embed_dim, device=cov.device).bool()
+        cov_loss = cov[off_diag_mask].pow(2).mean()
         
-        # Combined loss with weights
+        # Combined loss with ORIGINAL VICReg weights (strong regularization)
         # VICReg original: lambda=25 (invariance), mu=25 (variance), nu=1 (covariance)
-        # Using smaller weights since we also have L2 normalization
-        var_weight = 1.0   # Variance weight
-        cov_weight = 0.04  # Covariance weight
+        inv_weight = 25.0   # Invariance (MSE) weight
+        var_weight = 25.0   # Variance weight - STRONG
+        cov_weight = 1.0    # Covariance weight
         
-        loss = mse_loss + var_weight * var_loss + cov_weight * cov_loss
+        loss = inv_weight * mse_loss + var_weight * var_loss + cov_weight * cov_loss
         
         return predicted_latents, target_latents, loss
     
