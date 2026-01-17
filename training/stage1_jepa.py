@@ -29,12 +29,21 @@ def evaluate_jepa(
     Evaluate JEPA model on validation set.
     
     Returns:
-        Dictionary with metrics: mse, cosine_sim
+        Dictionary with comprehensive metrics:
+        - mse: L2 loss in latent space
+        - cosine_sim: Cosine similarity between predicted & target
+        - feature_variance: Variance of predicted features (collapse detection)
+        - feature_std: Std of predicted features
+        - target_variance: Variance of target features
+        - prediction_norm: Average L2 norm of predictions
+        - target_norm: Average L2 norm of targets
     """
     model.eval()
     
     total_mse = 0
     total_cosine = 0
+    all_predicted = []
+    all_targets = []
     num_batches = 0
     
     with torch.no_grad():
@@ -52,11 +61,44 @@ def evaluate_jepa(
             ).mean().item()
             total_cosine += cos_sim
             
+            # Collect embeddings for variance analysis
+            all_predicted.append(predicted.reshape(-1, predicted.size(-1)).cpu())
+            all_targets.append(target.reshape(-1, target.size(-1)).cpu())
+            
             num_batches += 1
+    
+    # Compute feature statistics (important for detecting collapse)
+    all_predicted = torch.cat(all_predicted, dim=0)  # (N, D)
+    all_targets = torch.cat(all_targets, dim=0)  # (N, D)
+    
+    # Feature variance per dimension, then mean across dimensions
+    pred_var = all_predicted.var(dim=0).mean().item()
+    pred_std = all_predicted.std(dim=0).mean().item()
+    target_var = all_targets.var(dim=0).mean().item()
+    
+    # Norms
+    pred_norm = all_predicted.norm(dim=-1).mean().item()
+    target_norm = all_targets.norm(dim=-1).mean().item()
+    
+    # Effective rank (approximation via entropy of singular values)
+    # This measures dimensionality usage (higher = better)
+    try:
+        U, S, V = torch.svd(all_predicted[:min(1000, len(all_predicted))])
+        S_norm = S / S.sum()
+        entropy = -(S_norm * torch.log(S_norm + 1e-10)).sum().item()
+        effective_rank = torch.exp(torch.tensor(entropy)).item()
+    except:
+        effective_rank = 0.0
     
     return {
         'mse': total_mse / num_batches,
         'cosine_sim': total_cosine / num_batches,
+        'feature_variance': pred_var,
+        'feature_std': pred_std,
+        'target_variance': target_var,
+        'prediction_norm': pred_norm,
+        'target_norm': target_norm,
+        'effective_rank': effective_rank,
     }
 
 
@@ -74,7 +116,8 @@ def train_stage1_jepa(
     ema_momentum: float = 0.996,
     max_grad_norm: float = 1.0,
     resume_path: str = None,
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 10,
+    early_stopping_min_epochs: int = 25
 ) -> JEPAPretrainingModel:
     """
     Train Stage 1 JEPA pretraining model.
@@ -94,6 +137,7 @@ def train_stage1_jepa(
         max_grad_norm: Maximum gradient norm for clipping
         resume_path: Path to checkpoint to resume from
         early_stopping_patience: Stop if no improvement for N epochs (0 = disabled)
+        early_stopping_min_epochs: Minimum epochs before early stopping can trigger (default 25)
         
     Returns:
         Trained model
@@ -119,7 +163,16 @@ def train_stage1_jepa(
     # Resume from checkpoint if provided
     start_epoch = 0
     best_val_loss = float('inf')
-    history = {'train_loss': [], 'val_mse': [], 'val_cosine': []}
+    history = {
+        'train_loss': [], 
+        'val_mse': [], 
+        'val_cosine': [],
+        'val_feature_variance': [],
+        'val_feature_std': [],
+        'val_effective_rank': [],
+        'learning_rate': [],
+        'grad_norm': [],
+    }
     
     if resume_path and Path(resume_path).exists():
         print(f"Resuming from checkpoint: {resume_path}")
@@ -173,6 +226,7 @@ def train_stage1_jepa(
         # Training
         model.train()
         train_loss = 0
+        epoch_grad_norms = []  # Track gradient norms for this epoch
         optimizer.zero_grad()
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
@@ -197,11 +251,15 @@ def train_stage1_jepa(
             if (batch_idx + 1) % grad_accum_steps == 0:
                 if scaler is not None:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                
+                # Compute gradient norm before clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm).item()
+                epoch_grad_norms.append(grad_norm)
+                
+                if scaler is not None:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
                     optimizer.step()
                 optimizer.zero_grad()
                 
@@ -212,7 +270,12 @@ def train_stage1_jepa(
                 pbar.set_postfix(loss=f"{loss.item()*grad_accum_steps:.4f}")
         
         train_loss /= len(train_loader)
+        avg_grad_norm = sum(epoch_grad_norms) / len(epoch_grad_norms) if epoch_grad_norms else 0
+        current_lr = scheduler.get_last_lr()[0]
+        
         history['train_loss'].append(train_loss)
+        history['grad_norm'].append(avg_grad_norm)
+        history['learning_rate'].append(current_lr)
         
         # Clear cache before validation
         if device == 'cuda':
@@ -222,6 +285,9 @@ def train_stage1_jepa(
         val_metrics = evaluate_jepa(model, val_loader, device)
         history['val_mse'].append(val_metrics['mse'])
         history['val_cosine'].append(val_metrics['cosine_sim'])
+        history['val_feature_variance'].append(val_metrics['feature_variance'])
+        history['val_feature_std'].append(val_metrics['feature_std'])
+        history['val_effective_rank'].append(val_metrics['effective_rank'])
         
         scheduler.step()
         
@@ -229,6 +295,10 @@ def train_stage1_jepa(
         print(f"  Train Loss: {train_loss:.4f}")
         print(f"  Val MSE: {val_metrics['mse']:.4f}")
         print(f"  Val Cosine Sim: {val_metrics['cosine_sim']:.4f}")
+        print(f"  Feature Variance: {val_metrics['feature_variance']:.6f}")
+        print(f"  Effective Rank: {val_metrics['effective_rank']:.2f}")
+        print(f"  Grad Norm: {avg_grad_norm:.4f}")
+        print(f"  Learning Rate: {current_lr:.6f}")
         
         # Save best model
         if val_metrics['mse'] < best_val_loss:
@@ -245,9 +315,22 @@ def train_stage1_jepa(
             epochs_without_improvement += 1
             print(f"  No improvement for {epochs_without_improvement} epoch(s)")
         
-        # Early stopping check
-        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
-            print(f"\n⚠ Early stopping triggered: no improvement for {early_stopping_patience} epochs")
+        # Always save last checkpoint (for resume)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_metrics': val_metrics,
+        }, save_dir / 'stage1_jepa_last.pt')
+        
+        # Save history
+        torch.save(history, save_dir / 'stage1_jepa_history.pt')
+        
+        # Early stopping check (only after minimum epochs)
+        if (early_stopping_patience > 0 and 
+            (epoch + 1) >= early_stopping_min_epochs and 
+            epochs_without_improvement >= early_stopping_patience):
+            print(f"\n⚠ Early stopping triggered: no improvement for {early_stopping_patience} epochs (after {early_stopping_min_epochs} warmup epochs)")
             break
     
     # Load best model

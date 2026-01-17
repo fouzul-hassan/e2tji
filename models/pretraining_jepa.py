@@ -101,6 +101,7 @@ class RegionTransformer(nn.Module):
     Transformer for processing region tokens.
     
     Takes N region embeddings and produces N contextualized embeddings.
+    Supports variable-length input with indexed positional embeddings.
     """
     
     def __init__(self,
@@ -112,8 +113,9 @@ class RegionTransformer(nn.Module):
         super().__init__()
         
         self.num_regions = num_regions
+        self.embed_dim = embed_dim
         
-        # Learnable region positional embeddings
+        # Learnable region positional embeddings (indexed by region ID)
         self.region_embed = nn.Parameter(
             torch.zeros(1, num_regions, embed_dim)
         )
@@ -139,16 +141,32 @@ class RegionTransformer(nn.Module):
     
     def forward(self, 
                 x: torch.Tensor, 
+                region_indices: Optional[torch.Tensor] = None,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Args:
-            x: Region tokens (B, num_regions, embed_dim)
+            x: Region tokens (B, N, embed_dim) where N can be any number <= num_regions
+            region_indices: Optional tensor of shape (N,) indicating which region each token is
+                           If None, assumes x contains all num_regions in order
             mask: Optional attention mask
         Returns:
-            Contextualized tokens (B, num_regions, embed_dim)
+            Contextualized tokens (B, N, embed_dim)
         """
+        B, N, D = x.shape
+        
+        # Get positional embeddings
+        if region_indices is not None:
+            # Index into region embeddings for specific regions
+            pos_embed = self.region_embed[:, region_indices, :]  # (1, N, D)
+        elif N == self.num_regions:
+            # Full regions, use all embeddings
+            pos_embed = self.region_embed
+        else:
+            # Partial regions without indices - just use first N embeddings
+            pos_embed = self.region_embed[:, :N, :]
+        
         # Add positional embeddings
-        x = x + self.region_embed
+        x = x + pos_embed
         
         # Transformer
         x = self.transformer(x, src_key_padding_mask=mask)
@@ -236,7 +254,8 @@ class JEPAPredictor(nn.Module):
         num_targets = (~context_mask.bool()).sum(dim=1).max().item()
         
         # Create full sequence with mask tokens at target positions
-        full_seq = self.mask_token.expand(B, N, -1).clone()  # (B, N, predictor_dim)
+        # Use same dtype as context_proj for FP16 compatibility
+        full_seq = self.mask_token.expand(B, N, -1).clone().to(context_proj.dtype)  # (B, N, predictor_dim)
         
         # Place context embeddings at context positions
         for i in range(B):
@@ -408,14 +427,20 @@ class JEPAPretrainingModel(nn.Module):
             all_target_embed = self._encode_regions(x, self.target_encoders)  # (B, N, D)
         
         # Extract context embeddings for transformer
+        # Use first sample's context indices for all (same mask structure per batch)
+        first_ctx_mask = context_mask[0].bool()
+        context_indices = torch.where(first_ctx_mask)[0]  # (num_ctx,)
+        
         context_embeds = []
         for i in range(B):
             ctx_idx = context_mask[i].bool()
             context_embeds.append(all_context_embed[i, ctx_idx])  # (num_ctx, D)
         context_embeds = torch.stack(context_embeds, dim=0)  # (B, num_ctx, D)
         
-        # Context transformer
-        context_transformed = self.context_transformer(context_embeds)  # (B, num_ctx, D)
+        # Context transformer with proper region indices
+        context_transformed = self.context_transformer(
+            context_embeds, region_indices=context_indices
+        )  # (B, num_ctx, D)
         
         # Target transformer (no gradient)
         with torch.no_grad():
@@ -435,8 +460,35 @@ class JEPAPretrainingModel(nn.Module):
         predicted_latents = F.normalize(predicted_latents, p=2, dim=-1)
         target_latents = F.normalize(target_latents.detach(), p=2, dim=-1)
         
-        # L2 loss in latent space (core JEPA objective)
-        loss = F.mse_loss(predicted_latents, target_latents)
+        # ============================================================
+        # VICReg-style loss (Variance-Invariance-Covariance Regularization)
+        # ============================================================
+        
+        # 1. Invariance loss (MSE between predicted and target)
+        mse_loss = F.mse_loss(predicted_latents, target_latents)
+        
+        # 2. Variance loss (encourage high variance to prevent collapse)
+        # Flatten to (N, D) for variance computation
+        pred_flat = predicted_latents.reshape(-1, self.embed_dim)  # (B*num_tgt, D)
+        
+        # Variance per dimension (want variance >= 1)
+        pred_std = torch.sqrt(pred_flat.var(dim=0) + 1e-4)  # (D,)
+        var_loss = torch.mean(F.relu(1 - pred_std))  # Hinge loss: penalize low variance
+        
+        # 3. Covariance loss (decorrelate dimensions)
+        pred_centered = pred_flat - pred_flat.mean(dim=0)
+        cov = (pred_centered.T @ pred_centered) / (pred_flat.size(0) - 1)  # (D, D)
+        # Zero out diagonal and compute off-diagonal loss
+        off_diag = cov.masked_fill(torch.eye(self.embed_dim, device=cov.device).bool(), 0)
+        cov_loss = (off_diag ** 2).sum() / self.embed_dim
+        
+        # Combined loss with weights
+        # VICReg original: lambda=25 (invariance), mu=25 (variance), nu=1 (covariance)
+        # Using smaller weights since we also have L2 normalization
+        var_weight = 1.0   # Variance weight
+        cov_weight = 0.04  # Covariance weight
+        
+        loss = mse_loss + var_weight * var_loss + cov_weight * cov_loss
         
         return predicted_latents, target_latents, loss
     

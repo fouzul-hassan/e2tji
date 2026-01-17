@@ -81,6 +81,8 @@ def main():
                         help='Resume training from last checkpoint')
     parser.add_argument('--early_stopping', type=int, default=10,
                         help='Early stopping patience (epochs without improvement, 0=disabled)')
+    parser.add_argument('--early_stopping_min', type=int, default=25,
+                        help='Minimum epochs before early stopping can trigger')
     
     args = parser.parse_args()
     
@@ -153,9 +155,15 @@ def main():
     # Determine resume path
     resume_path = None
     if args.resume:
-        checkpoint_path = Path(args.save_dir) / 'stage1_jepa_best.pt'
-        if checkpoint_path.exists():
-            resume_path = str(checkpoint_path)
+        # Try last checkpoint first (for true resume), then best
+        last_path = Path(args.save_dir) / 'stage1_jepa_last.pt'
+        best_path = Path(args.save_dir) / 'stage1_jepa_best.pt'
+        if last_path.exists():
+            resume_path = str(last_path)
+            print(f"✓ Resuming from last checkpoint")
+        elif best_path.exists():
+            resume_path = str(best_path)
+            print(f"✓ Resuming from best checkpoint")
         else:
             print("⚠ No checkpoint found to resume from, starting fresh")
     
@@ -173,7 +181,8 @@ def main():
         ema_momentum=args.ema_momentum,
         max_grad_norm=profile.max_grad_norm,
         resume_path=resume_path,
-        early_stopping_patience=args.early_stopping
+        early_stopping_patience=args.early_stopping,
+        early_stopping_min_epochs=args.early_stopping_min
     )
     
     # Final test evaluation
